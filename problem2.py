@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 # Sarah Chambers
 
-import argparse, os, csv, glob, shutil, time
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, regexp_extract, input_file_name,
-    to_timestamp, coalesce,
-    min as smin, max as smax, count as scount
-)
+import argparse, os, glob, shutil, time
 
 def save_one_csv(df, path):
-    # write a single csv by coalescing and moving the part file
+    """Write a small Spark DataFrame to a single CSV file (header included)."""
+    from pyspark.sql import DataFrame
+    assert isinstance(df, DataFrame)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    if df.rdd.isEmpty():
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(",".join(df.columns) + "\n")
+        print(f"[save_one_csv] Wrote empty CSV with header -> {path}")
+        return
+
     tmp = path + "_tmp"
     df.coalesce(1).write.mode("overwrite").option("header", "true").csv(tmp)
-    time.sleep(1)  # small wait helps some filesystems
+    time.sleep(0.8)  # small delay to avoid eventual consistency hiccups
     parts = sorted(glob.glob(os.path.join(tmp, "part-*")))
     if not parts:
-        # show folder to help debug
-        try:
-            print("debug tmp listing:", os.listdir(tmp))
-        except Exception as e:
-            print("debug could not list tmp:", e)
-        raise RuntimeError(f"no part-* file found in {tmp}")
+        raise RuntimeError(f"No part-* produced in {tmp}")
     shutil.move(parts[0], path)
     shutil.rmtree(tmp, ignore_errors=True)
 
@@ -32,36 +31,39 @@ def make_plots(timeline_csv, cluster_csv, outdir):
     t = pd.read_csv(timeline_csv, parse_dates=["start_time", "end_time"])
     c = pd.read_csv(cluster_csv)
 
-    # bar chart for number of apps per cluster
+    # bar chart
     plt.figure()
-    bars = plt.bar(c["cluster_id"].astype(str), c["num_apps"])
+    x = c["cluster_id"].astype(str)
+    y = c["num_applications"].astype(int)
+    bars = plt.bar(x, y)
     for b in bars:
         plt.text(b.get_x() + b.get_width()/2, b.get_height(),
                  str(int(b.get_height())), ha="center", va="bottom")
-    plt.title("apps per cluster")
-    plt.xlabel("cluster id")
-    plt.ylabel("apps")
+    plt.title("Applications per Cluster")
+    plt.xlabel("Cluster ID")
+    plt.ylabel("Number of Applications")
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, "problem2_bar_chart.png"), dpi=150)
     plt.close()
 
-    # histogram for duration of top cluster
-    top = c.sort_values("num_apps", ascending=False).iloc[0]["cluster_id"]
-    t1 = t[t["cluster_id"] == top].copy()
-    t1["dur_min"] = (t1["end_time"] - t1["start_time"]).dt.total_seconds() / 60
+    top_row = c.sort_values("num_applications", ascending=False).iloc[0]
+    top_id = str(top_row["cluster_id"])
+    t1 = t[t["cluster_id"].astype(str) == top_id].copy()
+    t1["dur_min"] = (t1["end_time"] - t1["start_time"]).dt.total_seconds() / 60.0
+
     plt.figure()
     plt.hist(t1["dur_min"], bins=30)
     plt.xscale("log")
-    plt.xlabel("duration (min, log)")
-    plt.ylabel("count")
-    plt.title(f"durations for cluster {int(top)} (n={len(t1)})")
+    plt.xlabel("Job Duration (minutes, log scale)")
+    plt.ylabel("Count")
+    plt.title(f"Duration Distribution — Cluster {top_id} (n={len(t1)})")
     plt.tight_layout()
     plt.savefig(os.path.join(outdir, "problem2_density_plot.png"), dpi=150)
     plt.close()
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("master", nargs="?")
+    p.add_argument("master", nargs="?")                  
     p.add_argument("--net-id", default=None)
     p.add_argument("--in", dest="inp", default=None)
     p.add_argument("--outdir", default="/home/ubuntu/spark-cluster")
@@ -74,10 +76,22 @@ def main():
     st_path = os.path.join(a.outdir, "problem2_stats.txt")
 
     if not a.skip_spark:
+        if not a.master:
+            raise SystemExit("Error: master URL required unless --skip-spark is set.")
+        if not a.net_id and not a.inp:
+            raise SystemExit("Error: --net-id (or --in to override input path) is required.")
+
         src = a.inp or f"s3a://{a.net_id}-assignment-spark-cluster-logs/data/"
+
+        from pyspark.sql import SparkSession
+        from pyspark.sql.functions import (
+            col, regexp_extract, input_file_name,
+            to_timestamp, coalesce, min as smin, max as smax, count as scount
+        )
+
         spark = (
             SparkSession.builder.master(a.master)
-            .appName("p2")
+            .appName("P2-ClusterUsage")
             .config("spark.hadoop.fs.s3a.aws.credentials.provider",
                     "org.apache.hadoop.fs.s3a.auth.IAMInstanceCredentialsProvider")
             .config("spark.sql.files.ignoreCorruptFiles", "true")
@@ -86,7 +100,7 @@ def main():
         )
         spark.sparkContext.setLogLevel("WARN")
 
-        # read logs
+        # Read logs (recursive)
         df = (
             spark.read.format("text")
             .option("recursiveFileLookup", "true")
@@ -94,56 +108,72 @@ def main():
             .select(col("value").alias("line"), input_file_name().alias("path"))
         )
 
-        # extract ids and times
-        df = df.withColumn("app_id",     regexp_extract(col("path"),   r"(application_\d+_\d+)", 1))
-        df = df.withColumn("cluster_id", regexp_extract(col("app_id"), r"application_(\d+)_\d+", 1))
-        df = df.withColumn("app_num",    regexp_extract(col("app_id"), r"application_\d+_(\d+)", 1))
+        # Extract IDs
+        df = df.withColumn("application_id", regexp_extract(col("path"), r"(application_\d+_\d+)", 1))
+        df = df.withColumn("cluster_id",    regexp_extract(col("application_id"), r"application_(\d+)_\d+", 1))
+        df = df.withColumn("app_number",    regexp_extract(col("application_id"), r"application_\d+_(\d+)", 1))
 
-# timestamps: match either 17/06/10 15:11:55 or 2017-06-10 15:11:55
-        ts_re = r"(\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})"
+        # Extract timestamps (supports yy/MM/dd and yyyy-MM-dd, with/without millis)
+        ts_re = r"(\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:,\d{3})?|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d{3})?)"
         df = df.withColumn("ts_str", regexp_extract(col("line"), ts_re, 1))
         df = df.withColumn(
             "ts",
-            expr("coalesce(to_timestamp(ts_str, 'yy/MM/dd HH:mm:ss'), to_timestamp(ts_str, 'yyyy-MM-dd HH:mm:ss'))")
+            coalesce(
+                to_timestamp(col("ts_str"), "yy/MM/dd HH:mm:ss,SSS"),
+                to_timestamp(col("ts_str"), "yy/MM/dd HH:mm:ss"),
+                to_timestamp(col("ts_str"), "yyyy-MM-dd HH:mm:ss,SSS"),
+                to_timestamp(col("ts_str"), "yyyy-MM-dd HH:mm:ss"),
+            )
         )
-        df = df.filter((col("app_id") != "") & col("ts").isNotNull())
 
+        df = df.filter((col("application_id") != "") & col("ts").isNotNull())
 
-        # timeline: one row per app with start/end
-        t = (
-            df.groupBy("cluster_id", "app_id", "app_num")
+        timeline = (
+            df.groupBy("cluster_id", "application_id", "app_number")
               .agg(smin("ts").alias("start_time"), smax("ts").alias("end_time"))
-              .orderBy("cluster_id", "app_num")
+              .orderBy("cluster_id", "app_number")
         )
-        save_one_csv(t, tl_path)
 
-        # cluster summary: how many apps and overall window
-        c = (
-            t.groupBy("cluster_id")
-             .agg(
-                 scount("*").alias("num_apps"),
-                 smin("start_time").alias("first_app"),
-                 smax("end_time").alias("last_app"),
-             )
-             .orderBy(col("num_apps").desc())
+        # Save with exact column names/order required
+        save_one_csv(
+            timeline.select("cluster_id", "application_id", "app_number", "start_time", "end_time"),
+            tl_path
         )
-        save_one_csv(c, cs_path)
 
-        # write stats
-        nc = c.count()
-        na = t.count()
-        avg = na / nc if nc else 0
-        top = c.limit(5).collect()
-        with open(st_path, "w") as f:
-            f.write(f"clusters: {nc}\napps: {na}\navg apps per cluster: {avg:.2f}\n\n")
-            for r in top:
-                f.write(f"cluster {r['cluster_id']}: {r['num_apps']} apps\n")
+        # Cluster summary
+        cluster_summary = (
+            timeline.groupBy("cluster_id")
+                    .agg(
+                        scount("*").alias("num_applications"),
+                        smin("start_time").alias("cluster_first_app"),
+                        smax("end_time").alias("cluster_last_app"),
+                    )
+                    .orderBy(col("num_applications").desc())
+        )
+        save_one_csv(cluster_summary, cs_path)
+
+        # Stats text
+        nc = cluster_summary.count()
+        na = timeline.count()
+        avg = (na / nc) if nc else 0.0
+        top5 = cluster_summary.limit(5).collect()
+        with open(st_path, "w", encoding="utf-8") as f:
+            f.write(f"Total unique clusters: {nc}\n")
+            f.write(f"Total applications: {na}\n")
+            f.write(f"Average applications per cluster: {avg:.2f}\n\n")
+            f.write("Most heavily used clusters:\n")
+            for r in top5:
+                f.write(f"  Cluster {r['cluster_id']}: {int(r['num_applications'])} applications\n")
 
         spark.stop()
 
-    # make charts
     make_plots(tl_path, cs_path, a.outdir)
-    print("done, files in", a.outdir)
+    print("Wrote:")
+    print(" ", tl_path)
+    print(" ", cs_path)
+    print(" ", st_path)
+    print(" ", os.path.join(a.outdir, "problem2_bar_chart.png"))
+    print(" ", os.path.join(a.outdir, "problem2_density_plot.png"))
 
 if __name__ == "__main__":
     main()
