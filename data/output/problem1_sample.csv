@@ -1,0 +1,11 @@
+log_entry,log_level
+"17/06/10 15:11:55 INFO python.PythonRunner: Times: total = 39, boot = -157, init = 196, finish = 0",INFO
+"17/06/08 12:12:42 INFO storage.MemoryStore: Block broadcast_278 stored as values in memory (estimated size 10.5 KB, free 2.5 MB)",INFO
+17/06/06 21:31:35 INFO mapred.SparkHadoopMapRedUtil: attempt_201706062131_0322_m_000019_12899: Committed,INFO
+17/06/09 18:45:30 INFO output.FileOutputCommitter: File Output Committer Algorithm version is 1,INFO
+"17/06/09 20:49:37 INFO python.PythonRunner: Times: total = 39, boot = 19, init = 20, finish = 0",INFO
+17/06/08 21:22:22 INFO storage.BlockManager: Found block rdd_24492_27 locally,INFO
+17/06/08 20:34:22 INFO output.FileOutputCommitter: Saved output of task 'attempt_201706082034_11353_m_000020_454185' to hdfs://10.10.34.11:9000/pjhe/test/254/_temporary/0/task_201706082034_11353_m_000020,INFO
+17/06/09 15:53:58 INFO executor.CoarseGrainedExecutorBackend: Got assigned task 63871,INFO
+17/02/01 21:13:56 INFO storage.ShuffleBlockFetcherIterator: Started 2 remote fetches in 0 ms,INFO
+17/06/08 12:06:59 INFO executor.Executor: Running task 8.0 in stage 97.0 (TID 3889),INFO
